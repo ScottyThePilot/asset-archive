@@ -47,6 +47,7 @@ use bzip2::read::BzDecoder;
 use flate2::Compression as DeflateCompression;
 use flate2::write::DeflateEncoder;
 use flate2::read::DeflateDecoder;
+use itertools::Itertools;
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
@@ -88,6 +89,11 @@ impl Archive {
     let table: Table = bincode::options().with_big_endian()
       .deserialize_from(table_reader)?;
 
+    // Guard against invalid overlapping regions / "zip bomb" attack
+    if !table.validate_entry_windows() {
+      return Err(ArchiveError::InvalidEntryRegions);
+    };
+
     Ok(Archive { table })
   }
 
@@ -114,6 +120,11 @@ impl Archive {
     let table_bytes = &bytes[table_start..table_end];
     let table: Table = bincode::options().with_big_endian()
       .deserialize(table_bytes)?;
+
+    // Guard against invalid overlapping regions / "zip bomb" attack
+    if !table.validate_entry_windows() {
+      return Err(ArchiveError::InvalidEntryRegions);
+    };
 
     Ok(Archive { table })
   }
@@ -362,6 +373,19 @@ impl Table {
     let path = entry.path.to_ascii_lowercase();
     self.contents.insert(path, entry);
   }
+
+  /// Validates that this table contains no entries that claim to own overlapping regions of the
+  /// archive body, which could be used to create "zip bomb" archives.
+  /// If `true`, the archive is safe, if `false`, it contains overlapping entries.
+  /// This check is performed automatically by parsing code, there is probably no need to call it manually.
+  pub fn validate_entry_windows(&self) -> bool {
+    self.contents.values().tuple_combinations()
+      .all(|(e1, e2)| !ranges_collide(e1.range(), e2.range()))
+  }
+}
+
+fn ranges_collide(r1: std::ops::Range<usize>, r2: std::ops::Range<usize>) -> bool {
+  !r1.is_empty() && !r2.is_empty() && (r1.contains(&r2.start) || r2.contains(&r1.start))
 }
 
 /// The raw representation of a file entry within the archive's table.
@@ -533,6 +557,8 @@ pub enum ArchiveError<U: Error = Infallible> {
   MagicBytes([u8; 4]),
   #[error("{0} ({})", .1.display())]
   InvalidPath(PathError, PathBuf),
+  #[error("archive contains overlapping entry regions")]
+  InvalidEntryRegions,
   #[error(transparent)]
   IoError(#[from] io::Error),
   #[error(transparent)]
@@ -548,6 +574,7 @@ impl ArchiveError {
     match self {
       ArchiveError::MagicBytes(bytes) => ArchiveError::MagicBytes(bytes),
       ArchiveError::InvalidPath(desc, path) => ArchiveError::InvalidPath(desc, path),
+      ArchiveError::InvalidEntryRegions => ArchiveError::InvalidEntryRegions,
       ArchiveError::IoError(error) => ArchiveError::IoError(error),
       ArchiveError::BincodeError(error) => ArchiveError::BincodeError(error),
       ArchiveError::UserError(x) => match x {},
@@ -560,6 +587,7 @@ impl<U: Error> ArchiveError<U> {
     match self {
       ArchiveError::MagicBytes(bytes) => Ok(ArchiveError::MagicBytes(bytes)),
       ArchiveError::InvalidPath(desc, path) => Ok(ArchiveError::InvalidPath(desc, path)),
+      ArchiveError::InvalidEntryRegions => Ok(ArchiveError::InvalidEntryRegions),
       ArchiveError::IoError(error) => Ok(ArchiveError::IoError(error)),
       ArchiveError::BincodeError(error) => Ok(ArchiveError::BincodeError(error)),
       ArchiveError::UserError(user_error) => Err(user_error),

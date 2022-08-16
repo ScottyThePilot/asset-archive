@@ -4,7 +4,7 @@ extern crate rand;
 
 use std::io::{Read, Cursor};
 
-use asset_archive::{Archive, Compression, CompressionMethod};
+use asset_archive::{Archive, Compression, CompressionMethod, Entry, Table};
 use rand::Rng;
 use rand::distributions::Standard;
 
@@ -92,4 +92,28 @@ fn read_write_compression() {
     assert_eq!(bytes_read as u64, entry.uncompressed_size);
     assert_eq!(contents_buffer, expected_contents, "contents mismatch");
   };
+}
+
+#[test]
+fn prevent_zip_bomb() {
+  let entry = Entry {
+    offset: 4,
+    size: 1024,
+    uncompressed_size: 1024,
+    compression_method: CompressionMethod::Store,
+    path: "file.txt".to_owned()
+  };
+
+  let malicious_contents = std::iter::repeat(entry.clone())
+    .take(16).enumerate()
+    .map(|(i, entry)| (i.to_string(), entry))
+    .collect();
+  let malicious_table = Table { contents: malicious_contents };
+
+  assert!(!malicious_table.validate_entry_windows());
+
+  let safe_contents = std::iter::once(("safe.txt".to_owned(), entry)).collect();
+  let safe_table = Table { contents: safe_contents };
+
+  assert!(safe_table.validate_entry_windows());
 }
